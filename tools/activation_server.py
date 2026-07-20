@@ -102,6 +102,28 @@ def require_json(*fields):
 
 # ── routes ────────────────────────────────────────────────────────────────────
 
+@app.post("/verify")
+def verify():
+    """Called by the app on every launch to confirm a previously-activated
+    key is still good. Unlike /activate, this does NOT claim a new machine
+    slot — it just checks (a) the key is still on the allowlist (hasn't
+    been revoked) and (b) this specific machine is still the one it's
+    bound to. No admin secret required since every regular user calls this."""
+    body    = require_json("key", "machineId")
+    key     = body["key"].strip().upper().replace(" ", "")
+    machine = body["machineId"].strip()[:64]
+
+    if not is_allowlisted(key):
+        return jsonify(ok=False, valid=False, reason="revoked")
+
+    db = load_db()
+    bound_machines = db.get(key, [])
+    if machine not in bound_machines:
+        return jsonify(ok=False, valid=False, reason="not_bound_to_this_machine")
+
+    return jsonify(ok=True, valid=True)
+
+
 @app.post("/activate")
 def activate():
     body      = require_json("key", "machineId")
@@ -199,6 +221,32 @@ def admin_revoke_key():
     db.pop(key, None)
     save_db(db)
     return jsonify(ok=True)
+
+
+@app.post("/admin/reset-all")
+def admin_reset_all():
+    """⚠️ Wipes every key and every activation. Any key already handed out
+    to a customer stops working immediately. Used by tools/reset_keys.py."""
+    body = require_json("adminSecret")
+    if body["adminSecret"] != SECRET:
+        abort(403, description="Bad admin secret.")
+
+    save_allowlist(set())
+    save_db({})
+    return jsonify(ok=True)
+
+
+@app.get("/admin/list-activations")
+def admin_list_activations():
+    """Lists every key that has at least one activation, and which machines
+    hold it. Does NOT show keys that were generated but never activated —
+    the server never stores plaintext keys it hasn't seen used, only hashes.
+    For your full list of issued keys, check tools/issued_keys.log, which
+    generate_keys.py writes to locally every time you mint a key."""
+    if request.args.get("secret") != SECRET:
+        abort(403)
+    db = load_db()
+    return jsonify(count=len(db), activations=db)
 
 
 @app.get("/health")
